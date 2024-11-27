@@ -31,28 +31,16 @@ ConnectDB();
 
 const authenticateJWT = (req, res, next) => {
   try {
-    const authHeader = req.headers["authorization"];
-    if (!authHeader) {
-      return res.status(401).json({ error: "No authorization header" });
+    const token = req.headers.authorization?.split(" ")[1];
+
+    if (!token) {
+      return res.status(401).json({ error: "No token provided" });
     }
 
-    const parts = authHeader.split(" ");
-    if (parts.length !== 2 || parts[0] !== "Bearer") {
-      return res.status(401).json({ error: "Invalid token format" });
-    }
-
-    const token = parts[1];
     jwt.verify(token, JWT_SECRET, (err, decoded) => {
       if (err) {
-        if (err.name === "TokenExpiredError") {
-          return res.status(401).json({ error: "Token expired" });
-        }
-        if (err.name === "JsonWebTokenError") {
-          return res.status(401).json({ error: "Invalid token" });
-        }
-        return res.status(403).json({ error: "Token verification failed" });
+        return res.status(401).json({ error: "Invalid token" });
       }
-
       req.user = decoded;
       next();
     });
@@ -82,11 +70,17 @@ app.post("/login", async (req, res) => {
     }
 
     const token = jwt.sign(
-      { username: user.username, id: user._id },
+      {
+        username: user.username,
+        id: user._id,
+        email: user.email,
+      },
       JWT_SECRET,
       { expiresIn: "96h" }
     );
-    return res.status(200).json({ token });
+    return res
+      .status(200)
+      .json({ token, user: { username: user.username, email: user.email } });
   } catch (error) {
     return res.status(500).json({ error: "Login failed" });
   }
@@ -100,7 +94,6 @@ app.post("/register", async (req, res) => {
       return res.status(400).json({ error: "All fields are required" });
     }
 
-    // Check if user already exists
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     if (existingUser) {
       return res
@@ -115,6 +108,25 @@ app.post("/register", async (req, res) => {
     return res.status(201).json({ message: "User registered successfully" });
   } catch (error) {
     return res.status(500).json({ error: "Registration failed" });
+  }
+});
+
+app.get("/user", authenticateJWT, async (req, res) => {
+  try {
+    console.log("User ID from token:", req.user.id);
+    const user = await User.findById(req.user.id)
+      .select("username email -_id")
+      .lean();
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    console.log("Found user:", user);
+    return res.status(200).json({ user });
+  } catch (error) {
+    console.error("Error fetching user:", error);
+    return res.status(500).json({ error: "Error fetching user" });
   }
 });
 
