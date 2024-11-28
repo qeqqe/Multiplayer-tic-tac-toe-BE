@@ -21,6 +21,11 @@ const userSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  stats: {
+    wins: { type: Number, default: 0 },
+    losses: { type: Number, default: 0 },
+    draws: { type: Number, default: 0 },
+  },
 });
 
 module.exports = mongoose.model("User", userSchema);

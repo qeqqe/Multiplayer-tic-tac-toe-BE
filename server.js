@@ -145,8 +145,23 @@ io.on("connection", (socket) => {
       if (hasWon) {
         room.status = "finished";
         room.winner = isHost ? room.host.id : room.guest.id;
+
+        // Update stats
+        const winner = isHost ? room.host : room.guest;
+        const loser = isHost ? room.guest : room.host;
+
+        await User.findByIdAndUpdate(winner.id, { $inc: { "stats.wins": 1 } });
+        await User.findByIdAndUpdate(loser.id, { $inc: { "stats.losses": 1 } });
       } else if (room.board.every((cell) => cell)) {
         room.status = "finished";
+
+        // Update draw stats for both players
+        await User.findByIdAndUpdate(room.host.id, {
+          $inc: { "stats.draws": 1 },
+        });
+        await User.findByIdAndUpdate(room.guest.id, {
+          $inc: { "stats.draws": 1 },
+        });
       }
 
       await room.save();
@@ -326,6 +341,19 @@ app.get("/room/:code", authenticateJWT, async (req, res) => {
   } catch (error) {
     console.error("Error fetching room:", error);
     return res.status(500).json({ error: "Failed to fetch room" });
+  }
+});
+
+// Add new endpoint to fetch user stats
+app.get("/user/stats", authenticateJWT, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select("stats -_id");
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    return res.status(200).json({ stats: user.stats });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch stats" });
   }
 });
 
