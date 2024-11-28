@@ -38,14 +38,45 @@ const ConnectDB = async () =>
 
 ConnectDB();
 
+// connected players
+const connectedPlayers = new Map();
+
+const checkWinner = (board) => {
+  const lines = [
+    [0, 1, 2],
+    [3, 4, 5],
+    [6, 7, 8], // rows
+    [0, 3, 6],
+    [1, 4, 7],
+    [2, 5, 8], // columns
+    [0, 4, 8],
+    [2, 4, 6], // diagonals
+  ];
+
+  for (const [a, b, c] of lines) {
+    if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+      return board[a];
+    }
+  }
+  return null;
+};
+
+const checkDraw = (board) => {
+  return board.every((cell) => cell !== null);
+};
+
 io.on("connection", (socket) => {
   console.log("User connected", socket.id);
+  let currentRoom = null;
+  let currentUser = null;
 
-  // Handle room joining
   socket.on("joinRoom", async ({ roomCode, token }) => {
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
-      const room = await Room.findOne({ code: roomCode });
+      const user = await User.findById(decoded.id);
+      const room = await Room.findOne({ code: roomCode }).populate(
+        "host guest"
+      );
 
       if (!room) {
         socket.emit("error", "Room not found");
@@ -54,49 +85,170 @@ io.on("connection", (socket) => {
 
       socket.join(roomCode);
 
-      // If user is not host and room needs a guest
-      if (room.host.toString() !== decoded.id && !room.guest) {
-        room.guest = decoded.id;
+      // If joining as guest
+      if (room.host._id.toString() !== user._id.toString() && !room.guest) {
+        room.guest = user._id;
         room.status = "playing";
+        room.isHostTurn = true; // Host goes first
+        room.board = Array(9).fill(null);
         await room.save();
-
-        io.to(roomCode).emit("gameUpdate", {
-          status: "playing",
-          board: Array(9).fill(null),
-          currentPlayer: room.host,
-          players: {
-            host: room.host,
-            guest: decoded.id,
-          },
-        });
       }
+
+      // Broadcast current game state
+      io.to(roomCode).emit("gameUpdate", {
+        status: room.status,
+        board: room.board,
+        currentPlayer: room.isHostTurn
+          ? room.host._id.toString()
+          : room.guest?._id.toString(),
+        players: {
+          host: { username: room.host.username, id: room.host._id },
+          guest: room.guest
+            ? { username: room.guest.username, id: room.guest._id }
+            : null,
+        },
+      });
     } catch (error) {
       console.error("Join room error:", error);
       socket.emit("error", "Failed to join room");
     }
   });
 
-  // Handle moves
-  socket.on("makeMove", async ({ index, roomCode }) => {
+  socket.on("makeMove", async ({ index, roomCode, userId }) => {
     try {
-      const room = await Room.findOne({ code: roomCode });
+      const room = await Room.findOne({ code: roomCode }).populate(
+        "host guest"
+      );
       if (!room || room.status !== "playing") return;
 
-      // Verify move validity and update game state
-      // Emit updated state to all players in room
-      io.to(roomCode).emit("playerMove", {
-        index,
-        player: room.currentPlayer === room.host ? "X" : "O",
-      });
+      const isHost = room.host._id.toString() === userId;
+      const isGuest = room.guest?._id.toString() === userId;
 
-      // Check for win/draw conditions here
+      // Validate turn
+      if ((isHost && !room.isHostTurn) || (isGuest && room.isHostTurn)) {
+        return;
+      }
+
+      // Validate move
+      if (room.board[index] !== null) {
+        return;
+      }
+
+      // Make move
+      const symbol = isHost ? "X" : "O";
+      room.board[index] = symbol;
+      room.isHostTurn = !room.isHostTurn;
+
+      // Check win condition
+      const winner = checkWinner(room.board);
+      const isDraw = !winner && checkDraw(room.board);
+
+      if (winner || isDraw) {
+        room.status = "finished";
+        await room.save();
+
+        io.to(roomCode).emit("gameUpdate", {
+          status: "finished",
+          board: room.board,
+          currentPlayer: null,
+          winner: winner
+            ? isHost
+              ? room.host.username
+              : room.guest.username
+            : null,
+          isDraw: isDraw,
+          players: {
+            host: { username: room.host.username, id: room.host._id },
+            guest: { username: room.guest.username, id: room.guest._id },
+          },
+        });
+      } else {
+        await room.save();
+        io.to(roomCode).emit("gameUpdate", {
+          status: "playing",
+          board: room.board,
+          currentPlayer: room.isHostTurn
+            ? room.host._id.toString()
+            : room.guest._id.toString(),
+          players: {
+            host: { username: room.host.username, id: room.host._id },
+            guest: { username: room.guest.username, id: room.guest._id },
+          },
+        });
+      }
     } catch (error) {
       console.error("Move error:", error);
     }
   });
 
-  socket.on("disconnect", () => {
+  socket.on("disconnect", async () => {
     console.log("User disconnected", socket.id);
+
+    const playerData = connectedPlayers.get(socket.id);
+    if (playerData) {
+      const { roomCode, userId } = playerData;
+      connectedPlayers.delete(socket.id);
+
+      try {
+        const gameRoom = await Room.findOne({ code: roomCode }).populate(
+          "host guest",
+          "username"
+        );
+        if (gameRoom && gameRoom.status === "playing") {
+          // winner (the player who didn't disconnect)
+          const isHost = gameRoom.host._id.toString() === userId.toString();
+          const winner = isHost ? gameRoom.guest : gameRoom.host;
+
+          gameRoom.status = "finished";
+          await gameRoom.save();
+
+          io.to(roomCode).emit("gameUpdate", {
+            status: "finished",
+            board: gameRoom.gameState?.board || Array(9).fill(null),
+            currentPlayer: null,
+            winner: winner.username,
+            disconnected: true,
+            players: {
+              host: { username: gameRoom.host.username, id: gameRoom.host._id },
+              guest: gameRoom.guest
+                ? { username: gameRoom.guest.username, id: gameRoom.guest._id }
+                : null,
+            },
+          });
+        }
+        const room = await Room.findOne({ code: roomCode });
+        if (room) {
+          // if any players are still in the room
+          const roomSockets = await io.in(roomCode).fetchSockets();
+
+          if (roomSockets.length === 0) {
+            // cleanup delay if room is empty
+            room.cleanupDelay = new Date();
+            await room.save();
+          } else {
+            // player disconnection
+            if (room.guest && room.guest.toString() === userId.toString()) {
+              room.guest = null;
+              room.status = "waiting";
+              await room.save();
+
+              io.to(roomCode).emit("gameUpdate", {
+                status: "waiting",
+                board: Array(9).fill(null),
+                currentPlayer: null,
+                players: {
+                  host: { username: room.host.username, id: room.host },
+                  guest: null,
+                  s,
+                },
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Disconnect handling error:", error);
+      }
+    }
   });
 });
 
@@ -249,9 +401,10 @@ app.get("/room/:code", authenticateJWT, async (req, res) => {
               username: room.guest.username,
               id: room.guest._id,
             }
-          : undefined,
+          : null,
         status: room.status,
-        board: Array(9).fill(null),
+        board: room.board || Array(9).fill(null), // Ensure board is sent
+        isHostTurn: room.isHostTurn,
       },
     });
   } catch (error) {
