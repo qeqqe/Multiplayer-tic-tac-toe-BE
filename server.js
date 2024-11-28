@@ -142,7 +142,10 @@ io.on("connection", (socket) => {
           room.board[a] === room.board[c]
       );
 
-      if (hasWon || room.board.every((cell) => cell)) {
+      if (hasWon) {
+        room.status = "finished";
+        room.winner = isHost ? room.host.id : room.guest.id;
+      } else if (room.board.every((cell) => cell)) {
         room.status = "finished";
       }
 
@@ -153,6 +156,7 @@ io.on("connection", (socket) => {
         board: room.board,
         xIsNext: room.xIsNext,
         status: room.status,
+        winner: room.winner,
         players: {
           host: { id: room.host.id, name: room.host.username },
           guest: { id: room.guest.id, name: room.guest.username },
