@@ -11,7 +11,7 @@ const handleJoinRoom = async (io, socket, { roomCode, user }) => {
 
     socket.join(roomCode);
 
-    // New guest joining
+    // let a new player join as guest
     if (room.host._id.toString() !== user._id.toString() && !room.guest) {
       room.guest = user._id;
       room.status = "playing";
@@ -20,15 +20,17 @@ const handleJoinRoom = async (io, socket, { roomCode, user }) => {
       await room.save();
     }
 
-    // Broadcast game state
-    io.to(roomCode).emit("gameUpdate", {
+    // let everyone know the game state
+    io.to(roomCode).emit("gameState", {
       status: room.status,
       board: room.board,
-      currentPlayer: room.isHostTurn ? room.host._id : room.guest?._id,
+      xIsNext: room.isHostTurn,
+      winner: room.winner?.toString(),
+      gameResult: room.gameResult,
       players: {
-        host: { username: room.host.username, id: room.host._id },
+        host: { id: room.host._id.toString(), name: room.host.username },
         guest: room.guest
-          ? { username: room.guest.username, id: room.guest._id }
+          ? { id: room.guest._id.toString(), name: room.guest.username }
           : null,
       },
     });
@@ -49,28 +51,31 @@ const handleMove = async (io, socket, { index, roomCode, userId }) => {
     const hasWon = checkWinner(room.board);
     const isDraw = !hasWon && checkDraw(room.board);
 
-    if (hasWon || isDraw) {
+    if (hasWon) {
       room.status = "finished";
-      room.winner = hasWon ? (isHost ? room.host._id : room.guest._id) : null;
+      room.winner = isHost ? room.host._id : room.guest._id;
+      room.gameResult = "win";
+    } else if (isDraw) {
+      room.status = "finished";
+      room.winner = null;
+      room.gameResult = "draw";
     } else {
       room.isHostTurn = !room.isHostTurn;
     }
 
     await room.save();
 
-    io.to(roomCode).emit("gameUpdate", {
+    io.to(roomCode).emit("gameState", {
       status: room.status,
       board: room.board,
-      currentPlayer: room.isHostTurn ? room.host._id : room.guest._id,
-      winner: room.winner
-        ? room.winner.equals(room.host._id)
-          ? room.host.username
-          : room.guest.username
-        : null,
-      isDraw: isDraw,
+      xIsNext: room.isHostTurn,
+      winner: room.winner?.toString(),
+      gameResult: room.gameResult,
       players: {
-        host: { username: room.host.username, id: room.host._id },
-        guest: { username: room.guest.username, id: room.guest._id },
+        host: { id: room.host._id.toString(), name: room.host.username },
+        guest: room.guest
+          ? { id: room.guest._id.toString(), name: room.guest.username }
+          : null,
       },
     });
   } catch (error) {
