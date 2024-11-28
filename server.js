@@ -12,6 +12,7 @@ const User = require("./models/User");
 const { CgAttachment } = require("react-icons/cg");
 const Room = require("./models/Room");
 const { generateRoomCode } = require("./utils/roomCode");
+const { handleJoinRoom, handleMove } = require("./src/socket/handlers");
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const MONGO_URI = process.env.MONGO_URI;
@@ -66,10 +67,6 @@ const checkDraw = (board) => {
 };
 
 io.on("connection", (socket) => {
-  console.log("User connected", socket.id);
-  let currentRoom = null;
-  let currentUser = null;
-
   socket.on("joinRoom", async ({ roomCode, token }) => {
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
@@ -78,176 +75,91 @@ io.on("connection", (socket) => {
         "host guest"
       );
 
-      if (!room) {
-        socket.emit("error", "Room not found");
-        return;
-      }
+      if (!room) return socket.emit("error", "Room not found");
 
       socket.join(roomCode);
 
-      // If joining as guest
-      if (room.host._id.toString() !== user._id.toString() && !room.guest) {
-        room.guest = user._id;
+      // Join as guest if possible
+      if (!room.guest && room.host.id !== user.id) {
+        room.guest = user.id;
         room.status = "playing";
-        room.isHostTurn = true; // Host goes first
-        room.board = Array(9).fill(null);
         await room.save();
       }
 
-      // Broadcast current game state
-      io.to(roomCode).emit("gameUpdate", {
-        status: room.status,
+      // Send state to everyone
+      io.to(roomCode).emit("gameState", {
         board: room.board,
-        currentPlayer: room.isHostTurn
-          ? room.host._id.toString()
-          : room.guest?._id.toString(),
+        xIsNext: room.xIsNext,
+        status: room.status,
         players: {
-          host: { username: room.host.username, id: room.host._id },
+          host: { id: room.host.id, name: room.host.username },
           guest: room.guest
-            ? { username: room.guest.username, id: room.guest._id }
+            ? { id: room.guest.id, name: room.guest.username }
             : null,
         },
       });
     } catch (error) {
-      console.error("Join room error:", error);
-      socket.emit("error", "Failed to join room");
+      socket.emit("error", "Failed to join");
     }
   });
 
-  socket.on("makeMove", async ({ index, roomCode, userId }) => {
+  socket.on("move", async ({ roomCode, index, token }) => {
     try {
+      const decoded = jwt.verify(token, JWT_SECRET);
       const room = await Room.findOne({ code: roomCode }).populate(
         "host guest"
       );
-      if (!room || room.status !== "playing") return;
 
-      const isHost = room.host._id.toString() === userId;
-      const isGuest = room.guest?._id.toString() === userId;
+      if (!room || room.status !== "playing") return;
+      if (room.board[index]) return; // Spot taken
+
+      const isHost = room.host.id === decoded.id;
+      const isGuest = room.guest?.id === decoded.id;
+      const isXTurn = room.xIsNext;
 
       // Validate turn
-      if ((isHost && !room.isHostTurn) || (isGuest && room.isHostTurn)) {
-        return;
-      }
-
-      // Validate move
-      if (room.board[index] !== null) {
-        return;
-      }
+      if ((isHost && !isXTurn) || (isGuest && isXTurn)) return;
 
       // Make move
-      const symbol = isHost ? "X" : "O";
-      room.board[index] = symbol;
-      room.isHostTurn = !room.isHostTurn;
+      room.board[index] = isXTurn ? "X" : "O";
+      room.xIsNext = !room.xIsNext;
 
-      // Check win condition
-      const winner = checkWinner(room.board);
-      const isDraw = !winner && checkDraw(room.board);
+      // Check win
+      const wins = [
+        [0, 1, 2],
+        [3, 4, 5],
+        [6, 7, 8],
+        [0, 3, 6],
+        [1, 4, 7],
+        [2, 5, 8],
+        [0, 4, 8],
+        [2, 4, 6],
+      ];
+      const hasWon = wins.some(
+        ([a, b, c]) =>
+          room.board[a] &&
+          room.board[a] === room.board[b] &&
+          room.board[a] === room.board[c]
+      );
 
-      if (winner || isDraw) {
+      if (hasWon || room.board.every((cell) => cell)) {
         room.status = "finished";
-        await room.save();
-
-        io.to(roomCode).emit("gameUpdate", {
-          status: "finished",
-          board: room.board,
-          currentPlayer: null,
-          winner: winner
-            ? isHost
-              ? room.host.username
-              : room.guest.username
-            : null,
-          isDraw: isDraw,
-          players: {
-            host: { username: room.host.username, id: room.host._id },
-            guest: { username: room.guest.username, id: room.guest._id },
-          },
-        });
-      } else {
-        await room.save();
-        io.to(roomCode).emit("gameUpdate", {
-          status: "playing",
-          board: room.board,
-          currentPlayer: room.isHostTurn
-            ? room.host._id.toString()
-            : room.guest._id.toString(),
-          players: {
-            host: { username: room.host.username, id: room.host._id },
-            guest: { username: room.guest.username, id: room.guest._id },
-          },
-        });
       }
+
+      await room.save();
+
+      // Broadcast new state
+      io.to(roomCode).emit("gameState", {
+        board: room.board,
+        xIsNext: room.xIsNext,
+        status: room.status,
+        players: {
+          host: { id: room.host.id, name: room.host.username },
+          guest: { id: room.guest.id, name: room.guest.username },
+        },
+      });
     } catch (error) {
-      console.error("Move error:", error);
-    }
-  });
-
-  socket.on("disconnect", async () => {
-    console.log("User disconnected", socket.id);
-
-    const playerData = connectedPlayers.get(socket.id);
-    if (playerData) {
-      const { roomCode, userId } = playerData;
-      connectedPlayers.delete(socket.id);
-
-      try {
-        const gameRoom = await Room.findOne({ code: roomCode }).populate(
-          "host guest",
-          "username"
-        );
-        if (gameRoom && gameRoom.status === "playing") {
-          // winner (the player who didn't disconnect)
-          const isHost = gameRoom.host._id.toString() === userId.toString();
-          const winner = isHost ? gameRoom.guest : gameRoom.host;
-
-          gameRoom.status = "finished";
-          await gameRoom.save();
-
-          io.to(roomCode).emit("gameUpdate", {
-            status: "finished",
-            board: gameRoom.gameState?.board || Array(9).fill(null),
-            currentPlayer: null,
-            winner: winner.username,
-            disconnected: true,
-            players: {
-              host: { username: gameRoom.host.username, id: gameRoom.host._id },
-              guest: gameRoom.guest
-                ? { username: gameRoom.guest.username, id: gameRoom.guest._id }
-                : null,
-            },
-          });
-        }
-        const room = await Room.findOne({ code: roomCode });
-        if (room) {
-          // if any players are still in the room
-          const roomSockets = await io.in(roomCode).fetchSockets();
-
-          if (roomSockets.length === 0) {
-            // cleanup delay if room is empty
-            room.cleanupDelay = new Date();
-            await room.save();
-          } else {
-            // player disconnection
-            if (room.guest && room.guest.toString() === userId.toString()) {
-              room.guest = null;
-              room.status = "waiting";
-              await room.save();
-
-              io.to(roomCode).emit("gameUpdate", {
-                status: "waiting",
-                board: Array(9).fill(null),
-                currentPlayer: null,
-                players: {
-                  host: { username: room.host.username, id: room.host },
-                  guest: null,
-                  s,
-                },
-              });
-            }
-          }
-        }
-      } catch (error) {
-        console.error("Disconnect handling error:", error);
-      }
+      socket.emit("error", "Move failed");
     }
   });
 });
